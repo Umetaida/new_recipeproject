@@ -4,8 +4,8 @@ from rest_framework.response import Response
 from django.http import JsonResponse
 from django.shortcuts import redirect
 from django.views.generic import ListView, CreateView
-from .models import Ingredient, Condition
-from .serializers import IngredientSerializer, ConditionSerializer
+from .models import Ingredient, Condition, SaveRecipe
+from .serializers import IngredientSerializer, ConditionSerializer, SaveRecipeSerializer
 from .forms import IngredientForm
 import requests, json, random
 import re
@@ -56,6 +56,10 @@ class ConditionViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(latest_condition)
             return Response(serializer.data)
         return Response({"detail": "No condition found."}, status=404)
+    
+class SaveRecipeViewSet(viewsets.ModelViewSet):
+    queryset = SaveRecipe.objects.all().order_by("-created_at")
+    serializer_class = SaveRecipeSerializer
 
 
 # ===== Helper: レシピデータ正規化 =====
@@ -171,17 +175,20 @@ def ai_recipe_suggest(request):
         # ==== Gemini プロンプト（候補レシピと使用食材を連動） ====
         prompt = f"""
         あなたは優秀な料理アドバイザーです。
-        以下の条件に従って5つのレシピを提案してください。
+        以下の条件に従ってレシピを５つ提案してください。
 
         条件:
-        - 以下の「食材リスト」から少なくとも1つ以上を含むレシピを選ぶ
-        - 「食材リスト」に登録されている食材をより多く利用しているレシピを優先的に選ぶ
+        - 「食材リスト」に登録された食材を２つ以上含むレシピを選ぶこと
+        - その中でも「食材リスト」に登録されている食材をより多く利用しているレシピを優先的に選ぶ
         - 「食材リスト」に登録されていない食材を利用するレシピは絶対に選ばないこと（例えそのレシピが体調に合っているとしても）
         - 「食材リスト」に登録されている名前そのままの食材を利用するものを選ぶこと(例：登録名が「キャベツ」の場合、冷凍ロールキャベツは登録されているレシピではない)
         - 今日の気分（体調）に合った内容にする
+        - 期限の近い食材を優先的に利用すること
+        - 「食材リスト」内に、そのレシピで利用されている食材があるときは全て表示すること
         - 同じようなレシピが続かないようバランスよく選ぶ
         - 出力形式は **必ず** JSON 配列のみ
         - 利用食材には利用量（100g、1玉、小さじ1杯など）も記載すること
+        - 作り方は文章で表示させてください。料理初心者でもわかりやすいように記載してください。
         - 各レシピの構造は以下の通り（Flutterアプリと連携するため固定）:
 
         [
@@ -190,10 +197,10 @@ def ai_recipe_suggest(request):
             "title": "レシピ名",
             "catch_copy": "短い説明文",
             "foodImageUrl": "https://example.com/img.jpg",
-            "recipeUrl": "https://example.com",
+            "recipeUrl": "１、食材を切る。２、炒める",
             "recipeCost": "300円",
             "ingredients": ["玉ねぎ 1個", "にんじん 1本"],
-            "instructions": ["1. 材料を切る", "2. 炒める", "3. 煮込む"],
+            "instructions": ["材料を切る", "炒める", "煮込む"],
             "recommendation_reason": "食材と体調からこのレシピを選びました。",
             "main_nutrients": ["たんぱく質", "ビタミンC"],
             "cooking_point": "焦がさないように中火で炒めましょう。"
@@ -264,12 +271,33 @@ def ai_recipe_suggest(request):
 @csrf_exempt
 @api_view(["POST"])
 def save_recipe(request):
-    if request.method == 'POST':
+    """
+    Flutterなどから送られたレシピ情報をDBに保存
+    """
+    try:
         data = json.loads(request.body)
         print("保存リクエスト受信:", data)
-        # TODO: 他人のDBへPOSTするならここで requests.post(...) する
-        return JsonResponse({'message': 'Recipe saved successfully'}, status=201)
-    return JsonResponse({'error': 'Invalid method'}, status=405)
+
+        serializer = SaveRecipeSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return JsonResponse({'message': 'Recipe saved successfully'}, status=201)
+        else:
+            print("シリアライザエラー:", serializer.errors)
+            return JsonResponse({'error': serializer.errors}, status=400)
+    except Exception as e:
+        print("保存中エラー:", e)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+def get_saved_recipes(request):
+    """
+    保存されたレシピ一覧を返す
+    """
+    recipes = SaveRecipe.objects.all().order_by("-created_at")
+    serializer = SaveRecipeSerializer(recipes, many=True)
+    return JsonResponse(serializer.data, safe=False, json_dumps_params={'ensure_ascii': False})
 
 
 @csrf_exempt
